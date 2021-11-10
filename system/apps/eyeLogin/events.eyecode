@@ -146,6 +146,10 @@ function eyeLogin_on_successLogin($params = '') {
 		} else {
 			loadConfig('eyeLogin');
 			proc('launch',array(LOGIN_EXECUTE,'autorun'));
+			#run nextcloud sync if config exists
+			if(!is_null(eyeXML('getXMLconfig',array('nextcloud','conf.xml')))) {
+				proc('launch',array('nextcloud',array("sync")));
+			}
 			proc('end');
 		}
 	}

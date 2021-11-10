@@ -37,14 +37,14 @@ Copyright © 2005 - 2010 eyeos Team (team@eyeos.org)
 global $charBlackList;
 $charBlackList = array("/","\\","<",">","[","]");
 
-
 /**
 * Creates an abstract file, with the possibility to specify
 * which app created it.
 *
-* @param $params array(file,[creationApp])
+* @param $params array(file,[creationApp],time)
 * @param $file Path to the new file.
 * @param $creationApp Name of the application that creates the file.
+* @param $time Timestamp to use for vfs
 * @return If the function succeeds, returns true. Otherwise, it
 *	returns false and sets the error code according to the error
 *	occurred.
@@ -54,7 +54,6 @@ $charBlackList = array("/","\\","<",">","[","]");
 * @date 2008/03/11
 */
 function service_vfs_create($params) {
-
 	if($params == null || count($params) < 1){
 		errorCodes('setErrorCode',array(INCORRECT_PARAMS));
 		return false;
@@ -62,13 +61,16 @@ function service_vfs_create($params) {
 
 	$file = $params[0];
 	$creationApp = $params[1];
+	$time = $params[2];
 
 	if (!vfs('checkPermissions',array($file))) {
 		return false;
 	}
 
 	//Get info
-	$time = time();
+	if(!(((string) (int) $time === $time) && ($time <= PHP_INT_MAX) && ($time >= ~PHP_INT_MAX))) {
+		$time = time();
+	}
 	global $currentUser;//Get the current user from global bar.
 
 
@@ -96,6 +98,7 @@ function service_vfs_create($params) {
 		errorCodes('setErrorCode',array(VFS_FILE_ALREADY_EXISTS));
 		return false;
 	}
+	vfs('events',array('create', array($file)));
 	return true;
 }
 
@@ -118,6 +121,7 @@ function service_vfs_restore($params = '') {
 		$params[0] = substr($params[0], 0, -strlen('.' . EYEOS_TRASH_EXT)); // utf8
 	}
 	if (vfs('real_move',array($params[0] . '.' . EYEOS_FILE_EXT,$params[1] . '.' . EYEOS_FILE_EXT))) {
+		vfs('events',array('restore', array($params[0],$params[1])));
 		return vfs('real_move',array($params[0] . '.' . EYEOS_INFO_EXT,$params[1] . '.' . EYEOS_INFO_EXT)) && vfs('real_delete',array($params[0] . '.' . EYEOS_TRASH_EXT));
 	}
 	return false;
@@ -142,6 +146,7 @@ function service_vfs_restoreDir($params = '') {
 		$params[0] = substr($params[0], 0, strlen('.' . EYEOS_TRASH_EXT)); // utf8
 	}
 	if (vfs('real_move',array($params[0] . '/',$params[1] . '/'))) {
+		vfs('events',array('restoreDir', array($params[0] . '/',$params[1] . '/')));
 		return vfs('real_delete',array($params[0] . '.' . EYEOS_TRASH_EXT));
 	}
 	return false;
@@ -204,6 +209,7 @@ function service_vfs_delete($params) {
 						)
 					);
 					file_put_contents($myUserDir . '/' . TRASH_USER_DIR . '/' . $name . '.' . EYEOS_TRASH_EXT, eyeXML('array2xml',array($data)));
+					vfs('events',array('deleteTrash', array($file)));
 					return true;
 				} else {
 					errorCodes('setErrorCode',array(PHP_ERROR_ON_UNLINK));
@@ -211,6 +217,7 @@ function service_vfs_delete($params) {
 				}
 			} else {
 				if (unlink($file.'.'.EYEOS_FILE_EXT) && unlink($file.'.'.EYEOS_INFO_EXT)) {
+					vfs('events',array('delete', array($file)));
 					return true;
 				} else {
 					errorCodes('setErrorCode',array(PHP_ERROR_ON_UNLINK));
@@ -306,6 +313,7 @@ function service_vfs_erase($params) {
 		$ferase = vfs('open',array($file, "w"));
 		fwrite($ferase, "");
 		fclose($ferase);
+		vfs('events',array('erase', array($file)));
 		return true;
 	}else{
 		errorCodes('setErrorCode',array(VFS_FILE_NOT_EXISTS));
@@ -370,6 +378,7 @@ function service_vfs_copy($params) {
 				$xml = eyeXML('xml2array',array(file_get_contents($orig . '.' . EYEOS_INFO_EXT)));
 				$xml['eyeFile'][0]['filename'][0] = basename($subdest);
 				file_put_contents($dest . '.' . EYEOS_INFO_EXT, eyeXML('array2xml',array($xml)));
+				vfs('events',array('copy', array($orig, $dest)));
 				return true;
 			} else {
 				errorCodes('setErrorCode',array(PHP_ERROR_ON_COPY));
@@ -423,6 +432,7 @@ function service_vfs_copyDir($params) {
 	$orig_dest = realpath(dirname($dest) . '/');
 	if ( /* utf8 */ strpos($orig_dest, $orig_real) !== 0) {
 		dircopy($orig,$dest);
+		vfs('events',array('copyDir', array($orig,$dest)));
 		return true;
 	} else {
 		return false;
@@ -486,6 +496,7 @@ function service_vfs_move($params) {
 				$xml['eyeFile'][0]['filename'][0] = basename($subdest);
 				file_put_contents($dest . '.' . EYEOS_INFO_EXT, eyeXML('array2xml',array($xml)));
 				if(@unlink($orig.'.'.EYEOS_INFO_EXT)) {
+					vfs('events',array('move', array($orig,$dest)));
 					return true;
 				} else {
 					errorCodes('setErrorCode',array(PHP_ERROR_ON_UNLINK));
@@ -542,9 +553,13 @@ function service_vfs_rename($params) {
 		return false;
 	}
 	if(is_dir($orig)) {
-		return @rename($orig,$dest);
+		$return = @rename($orig,$dest);
+		vfs('events',array('rename', array($orig,$dest)));
+		return $return;
 	}else {
-		return vfs('move',array($orig,$dest));
+		$return = vfs('move',array($orig,$dest));
+		vfs('events',array('rename', array($orig,$dest)));
+		return $return;
 	}
 }
 
@@ -740,6 +755,7 @@ function service_vfs_mkdir($params) {
 	if (!is_dir($dir) && !is_file($dir) && !vfs('fileExists',array($dir)))
 	{
 		if (mkdir($dir,0777)) {
+			vfs('events',array('mkdir', array($dir)));
 			return true;
 		} else {
 			errorCodes('setErrorCode',array(PHP_ERROR_ON_MKDIR));
@@ -827,6 +843,7 @@ function service_vfs_rmdir($params) {
 	} else {
 		deleteDirContent($dir);
 	}
+	vfs('events',array('rmdir', array($dir)));
 	return true;
 }
 
@@ -1109,6 +1126,7 @@ function service_vfs_writeFile($params) {
 		return false;
 	}
 	file_put_contents(vfs('getRealName',array($file)),$content);
+	vfs('events',array('writeFile', array($file)));
 	return true;
 }
 
@@ -2425,5 +2443,108 @@ function service_vfs_getFolderList($params) {
 		}
 	}
 	return $return;
+}
+
+/**
+ * Trigger all apps which subscribed to file system events.Subscription handled by shared memory segment. Application need to register Name and Parameter to call on event.
+ *
+ * 
+ * @param $params array(method, affectedFile/affectedDir)
+ * @return Does not return
+ * @date 2021/10/27
+ */
+function service_vfs_events($params) {
+	if (is_array($params) || count($params) < 1) {
+		$method = $params[0];
+		$affectedFile = $params[1];
+		$saveLocation = um('getCurrentUserDir') . '/' . 'files/subscribeFileEvents.json';
+		$shm = shm_attach(29654);
+		if(!shm_has_var($shm, 1)) { 
+			$subscribedApps = json_decode(file_get_contents($saveLocation), true);
+			shm_put_var($shm, 1, $subscribedApps);
+		}
+		$subscribedApps = shm_get_var($shm, 1);
+		if(!is_null($subscribedApps)){
+			foreach ($subscribedApps as $sub) {
+				proc('launch',array($sub[0],array($sub[1],array($method, $affectedFile))));
+			}
+		}
+	}
+}
+
+/**
+ * Subscribe app to file events
+ *
+ * @param $params array(name, parameter)
+ * @return Does not return
+ * @date 2021/10/27
+ */
+function service_vfs_suscribeEvents($params) {
+	$shm = shm_attach(29654);
+	if(!is_array($params) || count($params) < 2){
+		shm_remove($shm);
+		$shm = shm_attach(29654);
+	}
+	$saveLocation = um('getCurrentUserDir') . '/' . 'files/subscribeFileEvents.json';
+	if(shm_has_var($shm, 1)) {
+		$oldVal = shm_get_var($shm, 1);
+		if (!in_array(array($params[0], $params[1]), $oldVal)) {
+			if(!(is_array($oldVal))) {
+				$oldVal = array();
+			}
+			array_push($oldVal, array($params[0], $params[1]));
+			error_log("test:");
+			error_log(print_r($oldVal,TRUE));
+			error_log(print_r(array($params[0], $params[1]),TRUE));
+			shm_put_var($shm, 1, $oldVal);
+			vfs('real_putFileContent',array($saveLocation,json_encode($oldVal)));
+		}
+	} else {
+		if(file_exists($saveLocation)) {
+			$val = json_decode(file_get_contents($saveLocation), true);
+			shm_put_var($shm, 1, $val);
+		} else {
+			$val[] = array($params[0], $params[1]);
+			shm_put_var($shm, 1, $val);
+			vfs('real_putFileContent',array($saveLocation,json_encode($val)));
+		}
+	}
+	shm_detach($shm);
+}
+
+/**
+ * Remove app from file events
+ *
+ * @param $params array(name, parameter)
+ * @return Does not return
+ * @date 2021/10/27
+ */
+function service_vfs_removeEvents($params) {
+	$shm = shm_attach(29654);
+	if($params[2]){
+		shm_remove($shm);
+		$shm = shm_attach(29654);
+	}
+	$saveLocation = um('getCurrentUserDir') . '/' . 'files/subscribeFileEvents.json';
+	if(shm_has_var($shm, 1)) {
+		$oldVal = shm_get_var($shm, 1);
+		$keysToRemove = array_keys($oldVal, array($params[0], $params[1]));
+		foreach ($keysToRemove as $key => $value) {
+			unset($oldVal[$value]);
+		}
+		shm_put_var($shm, 1, $oldVal);
+		vfs('real_putFileContent',array($saveLocation,json_encode($oldVal)));
+	} else {
+		if(file_exists($saveLocation)) {
+			$val = json_decode(file_get_contents($saveLocation), true);
+			$keysToRemove = array_keys($val, array($params[0], $params[1]));
+			foreach ($keysToRemove as $key => $value) {
+				unset($val[$value]);
+			}
+			vfs('real_putFileContent',array($saveLocation,json_encode($val)));
+			shm_put_var($shm, 1, $val);
+		}
+	}
+	shm_detach($shm);
 }
 ?>

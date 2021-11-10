@@ -104,6 +104,7 @@ function eyeFiles_run($params = '') {
 	}
 	$myToolbar->addLine('ActionsLine');
 	$myToolbar->addItem('Upload','index.php?theme=' . $_SESSION['usertheme'] . '&extern=icons/22x22/upload.png','Upload files');
+	$myToolbar->addItem('Nextcloud','index.php?theme=' . $_SESSION['usertheme'] . '&extern=icons/22x22/refresh.png','Sync Nextcloud');
 	$myToolbar->addItem('NewFolder','index.php?theme=' . $_SESSION['usertheme'] . '&extern=icons/22x22/newfolder.png','New folder');
 	$myToolbar->addItem('NewFile','index.php?theme=' . $_SESSION['usertheme'] . '&extern=icons/22x22/create.png','New file');
 	$myToolbar->addItem('EmptyTrash','index.php?theme=' . $_SESSION['usertheme'] . '&extern=icons/22x22/emptyTrash.png','Empty trash');

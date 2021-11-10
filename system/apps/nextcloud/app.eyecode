@@ -1,0 +1,133 @@
+<?php
+/*
+  ___  _ __   ___ _   _  ___
+ / _ \| '_ \ / _ \ | | |/ _ \
+| (_) | | | |  __/ |_| |  __/
+ \___/|_| |_|\___|\__, |\___|
+                  |___/
+
+oneye is released under the GNU Affero General Public License Version 3 (AGPL3)
+ -> provided with this release in license.txt
+ -> or via web at www.gnu.org/licenses/agpl-3.0.txt
+
+Copyright © 2005 - 2010 eyeos Team (team@eyeos.org)
+             since 2010 Lars Knickrehm (mail@lars-sh.de)
+*/
+global $config;
+global $nextcloudURL;
+global $nextcloudPath;
+$config = eyeXML('getXMLconfig',array('nextcloud','conf.xml'));
+$nextcloudURL = $config['nextcloud'][0]['url'][0];
+$nextcloudPath = um('getCurrentUserDir') . 'files/Nextcloud' . '/';
+
+include_once(EYE_ROOT.'/'.APP_DIR.'/nextcloud/func'.EYE_CODE_EXTENSION);
+
+function Nextcloud_run($params = '') {
+	if($params[0] == "sync") {
+		fullsync($params);
+	} else if ($params[0] == "file_events") {
+		fileEvents($params);	
+	} else {
+		$myWindow = new Window(array(
+			'cent' => 1,
+			'father' => 'eyeApps',
+			'height' => 210,
+			'name' => 'Nextcloud_Window',
+			'title' => 'Nextcloud',
+			'width' => 200
+		));
+		$myWindow->show();
+
+		$myLabelURL = new Label(array(
+			'father' => 'Nextcloud_Window_Content',
+			'name' => 'Nextcloud_URL_Label',
+			'text' => 'Nextcloud URL:',
+			'x' => 20,
+			'y' => 20
+		));
+		$myLabelURL->show(0);
+
+		$myTextboxURL = new Textbox(array(
+			'father' => 'Nextcloud_Window_Content',
+			'name' => 'Nextcloud_URL_Textbox',
+			'width' => 150,
+			'x' => 20,
+			'y' => 35
+		));
+		$myTextboxURL->show();
+
+		$myTextboxURL->focus();
+
+		$myLabelUser = new Label(array(
+			'father' => 'Nextcloud_Window_Content',
+			'name' => 'Nextcloud_User_Label',
+			'text' => 'Nextcloud User:',
+			'x' => 20,
+			'y' => 65
+		));
+		$myLabelUser->show(0);
+		$myTextboxUser = new Textbox(array(
+			'father' => 'Nextcloud_Window_Content',
+			'name' => 'Nextcloud_User_Textbox',
+			'width' => 150,
+			'x' => 20,
+			'y' => 80
+		));
+		$myTextboxUser->show();
+
+		$myLabelPassword = new Label(array(
+			'father' => 'Nextcloud_Window_Content',
+			'name' => 'Nextcloud_Password_Label',
+			'text' => 'Nextcloud Password:',
+			'x' => 20,
+			'y' => 110
+		));
+		$myLabelPassword->show(0);
+		$myTextboxPassword = new Textbox(array(
+			'father' => 'Nextcloud_Window_Content',
+			'name' => 'Nextcloud_Password_Textbox',
+			'width' => 150,
+			'x' => 20,
+			'y' => 125,
+			'password' => 1
+		));
+		$myTextboxPassword->show();
+
+		//
+		$myButton = new Button(array(
+			'caption' => 'Save',
+			'father' => 'Nextcloud_Window_Content',
+			'name' => 'Nextcloud_Save_Button',
+			'x' => 20,
+			'y' => 155
+		));
+		$syncButton = new Button(array(
+			'caption' => 'Start Sync',
+			'father' => 'Nextcloud_Window_Content',
+			'name' => 'Nextcloud_Sync_Button',
+			'x' => 115,
+			'y' => 155
+		));
+		// The Textbox need to be a friend of the Button:
+		// So every time the user clicks the Button the Textbox
+		// text will be sent.
+		// A button can have as many friends as you want.
+		$myButton->addFriend($myTextboxURL);
+		$myButton->addFriend($myTextboxUser);
+		$myButton->addFriend($myTextboxPassword);
+		$myButton->show();
+		$syncButton->show();
+		//load config data
+		if(!(empty(trim($GLOBALS['config']['nextcloud'][0]['url'][0])) && empty(trim($GLOBALS['config']['nextcloud'][0]['username'][0])) && empty(trim($GLOBALS['config']['nextcloud'][0]['password'][0])))) {
+			$GLOBALS['Nextcloud_URL_Textbox']->setText($GLOBALS['config']['nextcloud'][0]['url'][0]);
+			$GLOBALS['Nextcloud_User_Textbox']->setText($GLOBALS['config']['nextcloud'][0]['username'][0]);
+			$GLOBALS['Nextcloud_Password_Textbox']->setText($GLOBALS['config']['nextcloud'][0]['password'][0]);
+		}
+	}
+	
+}
+
+function Nextcloud_end($params = '') {
+	eyeWidgets('unserialize',$params);
+}
+?>

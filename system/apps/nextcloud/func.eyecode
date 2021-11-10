@@ -1,0 +1,476 @@
+<?php
+/*
+  ___  _ __   ___ _   _  ___
+ / _ \| '_ \ / _ \ | | |/ _ \
+| (_) | | | |  __/ |_| |  __/
+ \___/|_| |_|\___|\__, |\___|
+                  |___/
+
+oneye is released under the GNU Affero General Public License Version 3 (AGPL3)
+ -> provided with this release in license.txt
+ -> or via web at www.gnu.org/licenses/agpl-3.0.txt
+
+Copyright © 2005 - 2010 eyeos Team (team@eyeos.org)
+             since 2010 Lars Knickrehm (mail@lars-sh.de)
+*/
+
+
+/*********************************************************************************************/
+//		Full Sync Function
+/*********************************************************************************************/
+function fullsync($params) {
+		if(!(empty(trim($GLOBALS['config']['nextcloud'][0]['url'][0])) && empty(trim($GLOBALS['config']['nextcloud'][0]['username'][0])) && empty(trim($GLOBALS['config']['nextcloud'][0]['password'][0])))) {
+            $lastLocalDataPath = um('getCurrentUserDir') . 'files/oldLocalData.json';
+            vfs('removeEvents',array("nextcloud","file_events"));
+            vfs('mkDir',array($GLOBALS['nextcloudPath']));
+			//-------------------------- Step 1 ------------------------------
+
+			//get file list locally
+			$localData = dirToArray($GLOBALS['nextcloudPath']);
+
+			//get last sync json
+			$lastLocalData = json_decode(file_get_contents($lastLocalDataPath), true);
+			if($lastLocalData) {		
+				//delete changes
+				deleteChanges($localData, $lastLocalData);
+			}
+
+			//-------------------------- Step 2 ------------------------------
+			//get file list from nextcloud
+			$urlPath = parse_url($GLOBALS['nextcloudURL'], PHP_URL_PATH);
+			$nextcloudSyncXML = simplexml_load_string(webDAVRequest("PROPFIND", $GLOBALS['nextcloudURL']));
+			//prepare array for comparison of changes
+			$flattenArrayLastData = array();
+			flattenArray($lastLocalData, $flattenArrayLastData);
+			$flattenArrayActualData = array();
+			flattenArray($localData, $flattenArrayActualData);
+			$arrayDiff = array_diff($flattenArrayActualData, $flattenArrayLastData);
+			//sync new or modified files
+			$namespaces = $nextcloudSyncXML->getNamespaces(true);
+			foreach($nextcloudSyncXML->children($namespaces['d']) as $child) {
+				$childHref = $child->children($namespaces['d'])->href;
+				$cleanString = str_replace($urlPath, "", $childHref);
+				$sURL = $GLOBALS['nextcloudURL'] . $cleanString;
+				$childLastModified = $child->children($namespaces['d'])->propstat->prop->getlastmodified;
+				$timeLastModified = (DateTime::createFromFormat('D, d M Y H:i:s e', $childLastModified))->getTimestamp();
+				$oneyesync = $child->children($namespaces['d'])->propstat->prop->oneyesync;
+				if((!is_Null($oneyesync)) && $oneyesync > $timeLastModified) {
+					$timeLastModified = $oneyesync;
+				}
+				if($cleanString != "") {
+					$path = eyeFiles('cleanPath',array($GLOBALS['nextcloudPath']));
+					$path[0] .= urldecode($cleanString);
+					//check which files got deleted online
+					$key = rtrim(urldecode($cleanString), "/");
+					if(key_exists($key , $flattenArrayLastData)) {
+						unset($flattenArrayLastData[$key]);
+					}
+					if( substr($childHref, -1) == "/"){
+						//create folder
+						vfs('mkDir',array(urldecode($path[0])));
+					} else {
+						//create file
+						if(!vfs('fileExists', array($path[0]))) {
+							if (vfs('create',array($path[0]))) {
+								$contents = webDAVRequest("GET", $sURL);
+								vfs('writeFile',array($path[0],$contents));
+								webDAVRequest("PROPPATCH", $sURL, $path[0]);
+							} else {
+								//file creation failed
+							}
+						} else {
+							//handling already existing files
+							$file = getRealFileName($path[0]);
+							$fileModifiedTime = filemtime($file . '.' . EYEOS_FILE_EXT);
+							$fileInfo = vfs('readInfo', array($path[0]));
+							if($timeLastModified > $fileModifiedTime && $fileModifiedTime <= $fileInfo['eyeFile'][0]['synced'][0] && $timeLastModified > $fileInfo['eyeFile'][0]['synced'][0]) {
+								//download modified file
+								$contents = webDAVRequest("GET", $sURL);
+								vfs('writeFile',array($path[0],$contents));
+								//sync modified date 
+								updateVfs($path[0],array($timeLastModified, time()));
+							} else if ($timeLastModified < $fileModifiedTime && $fileModifiedTime > $fileInfo['eyeFile'][0]['synced'][0] && $timeLastModified <= $fileInfo['eyeFile'][0]['synced'][0]) {
+								//upload modified file
+								webDAVRequest("PUT", $sURL, $path[0]);
+								updateVfs($path[0],array($fileModifiedTime, time()));
+							} else if ($timeLastModified > $fileInfo['eyeFile'][0]['synced'][0] && $fileModifiedTime > $fileInfo['eyeFile'][0]['synced'][0]) {
+								//handle conflics
+								$newPath = substr_replace($path[0], "_conflict", strrpos($path[0], '.'), 0 );
+								$newURL = substr_replace($sURL, "_conflict", strrpos($sURL, '.'), 0 );
+								if($timeLastModified > $fileModifiedTime) {
+									//move local file to x_conflict
+									vfs('copy',array( $path[0], $newPath));
+									//download newer file
+									vfs('writeFile',array($path[0],webDAVRequest("GET", $sURL)));
+									updateVfs($path[0],array($timeLastModified, time()));
+									//upload local file
+									webDAVRequest("PUT", $newURL, $newPath);	
+								} else if ($timeLastModified < $fileModifiedTime) {
+									//rename online file
+									webDAVRequest("MOVE", $sURL, "", $newURL);	
+									//upload local file
+									webDAVRequest("PUT", $sURL, $path[0]);	
+									//download online file
+									if (vfs('create',array($newPath))) {
+										vfs('writeFile',array($newPath,webDAVRequest("GET", $newURL)));
+										//sync modified date
+										updateVfs($newPath,array($timeLastModified, time()));		
+									}
+								}
+							}
+
+						}
+					}
+				}
+			}
+			//delete online removed files
+			foreach ($flattenArrayLastData as $key => $value) {
+					$path = $GLOBALS['nextcloudPath'].$value;
+					if(vfs('isdir',array($path))) {
+						vfs('rmdir',array($path));
+					} else {
+						vfs('delete',array($path));
+					}
+			}
+			//create local added files
+			uasort($arrayDiff, function($a, $b) {
+				return strlen($a) <=> strlen($b);
+			});
+			foreach ($arrayDiff as $key => $value) {
+				if(count($nextcloudSyncXML->xpath('d:response/d:href[.="'.$urlPath.$value.'"]/parent::*')) == 0) {
+					$path = $GLOBALS['nextcloudPath'].$value;
+					if(vfs('isdir',array($path))) {
+						$sURL = $GLOBALS['nextcloudURL'] . $value;
+						webDAVRequest("MKCOL", $sURL);	
+					} else {
+						$sURL = $GLOBALS['nextcloudURL'] . $value;
+						webDAVRequest("PUT", $sURL, $path);	
+					}
+				}
+			}
+			//update ui stuff
+			if($params[1] != null){
+				eyeFiles('update',array($params[1]));
+			} else {
+				eyeFiles('update',array('home:///'));
+			}
+			//save local list xml
+			vfs('real_create',array($lastLocalDataPath));
+			//get file list locally
+			$localData = dirToArray($GLOBALS['nextcloudPath']);
+			vfs('real_putFileContent',array($lastLocalDataPath,json_encode($localData)));
+			//set last sync time
+			$GLOBALS['config']['nextcloud'][0]['lastSync'][0] = time();
+			eyeXML('setXMLconfig', array('nextcloud', 'conf.xml', $GLOBALS['config']));
+			//inform user about finished sync
+            eyeX('messageBox',array('content' => 'Nextcloud Sync finished!'));
+            vfs('suscribeEvents',array("nextcloud","file_events"));
+		} else {
+			eyeX('messageBox',array('content' => 'Nextcloud Sync is not configured!'));
+		}
+		proc('end');
+}
+
+/*********************************************************************************************/
+//		FileEvent Function
+/*********************************************************************************************/
+
+function fileEvents($params) {
+    if(!(empty(trim($GLOBALS['config']['nextcloud'][0]['url'][0])) && empty(trim($GLOBALS['config']['nextcloud'][0]['username'][0])) && empty(trim($GLOBALS['config']['nextcloud'][0]['password'][0])))) {
+        switch ($params[1][0]) {
+            case 'create':
+                if (str_contains($params[1][1][0], $GLOBALS['nextcloudPath'])) {
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][0]);
+                    webDAVRequest("PUT", $url, $params[1][1][0]);
+                    webDAVRequest("PROPPATCH", $url, $params[1][1][0]);
+                }
+                break;
+            case 'writeFile':
+                if (str_contains($params[1][1][0], $GLOBALS['nextcloudPath'])) {
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][0]);
+                    webDAVRequest("PUT", $url, $params[1][1][0]);
+                    webDAVRequest("PROPPATCH", $url, $params[1][1][0]);
+                }
+                break;
+            case 'restore':
+                if (str_contains($params[1][1][1], $GLOBALS['nextcloudPath'])) {
+                    $filePath = vfs('getVirtualName',array($params[1][1][1]));
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $filePath);
+                    $path = $filePath.$value;
+                    webDAVRequest("PUT", $url, $path);
+                    webDAVRequest("PROPPATCH", $url, $path);
+                }
+                break;
+            case 'restoreDir':
+                if (str_contains($params[1][1][1], $GLOBALS['nextcloudPath'])) {
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][1]);
+                    webDAVRequest("MKCOL", $url);
+                    $content = dirToArray($params[1][1][1]);
+                    $flatArray = array();
+                    flattenArray($content, $flatArray);
+                    foreach ($flatArray as $key => $value) {
+                        $path = $params[1][1][1].$value;
+                        $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $path);
+                        if(vfs('isdir',array($path))) {
+                            webDAVRequest("MKCOL", $url);
+                        } else {
+                            webDAVRequest("PUT", $url, $path);
+                            webDAVRequest("PROPPATCH", $url, $path);
+                        }
+                    }
+                }
+                break;
+            case 'deleteTrash':
+                if (str_contains($params[1][1][0], $GLOBALS['nextcloudPath'])) {
+                    $filename = vfs('getVirtualName',array($params[1][1][0]));
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $filename);
+                    webDAVRequest("DELETE", $url);
+                }
+            case 'delete':
+                # handelt by other event
+                break;
+            case 'erase':
+                # handelt by other event
+                break;
+            case 'copy':
+                if (str_contains($params[1][1][1], $GLOBALS['nextcloudPath'])) {
+                    $filenameFrom = vfs('getVirtualName',array($params[1][1][0]));
+                    $filenameTo = vfs('getVirtualName',array($params[1][1][1]));
+                    $urlFrom = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $filenameFrom);
+                    $urlTo = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $filenameTo);
+                    webDAVRequest("COPY", $urlFrom, "", $urlTo);
+                    webDAVRequest("PROPPATCH", $urlTo, $filenameTo);
+                }
+                break;
+            case 'copyDir':
+                if (str_contains($params[1][1][1], $GLOBALS['nextcloudPath'])) {
+                    $urlFrom = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][0]);
+                    $urlTo = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][1]);
+                    webDAVRequest("COPY", $urlFrom, "", $urlTo);
+                }
+                break;
+            case 'move':
+                //used as move for files
+                if (str_contains($params[1][1][1], $GLOBALS['nextcloudPath']) && str_contains($params[1][1][0], $GLOBALS['nextcloudPath'])) {
+                    $filenameFrom = vfs('getVirtualName',array($params[1][1][0]));
+                    $filenameTo = vfs('getVirtualName',array($params[1][1][1]));
+                    $urlFrom = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $filenameFrom);
+                    $urlTo = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $filenameTo);
+                    webDAVRequest("MOVE", $urlFrom, "", $urlTo);
+                } else if (str_contains($params[1][1][1], $GLOBALS['nextcloudPath']) && !str_contains($params[1][1][0], $GLOBALS['nextcloudPath'])) {
+                    //moved in nextcloud folder
+                    $filename = vfs('getVirtualName',array($params[1][1][1]));
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $filename);
+                    webDAVRequest("PUT", $url, $filename);
+                    webDAVRequest("PROPPATCH", $url, $filename);
+                } else if (!str_contains($params[1][1][1], $GLOBALS['nextcloudPath']) && str_contains($params[1][1][0], $GLOBALS['nextcloudPath'])) {
+                    //moved out of nextcloud folder
+                    $filename = vfs('getVirtualName',array($params[1][1][0]));
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $filename);
+                    webDAVRequest("DELETE", $url);
+                }
+                break;
+            case 'rename':
+                //used as move for folder
+                if (str_contains($params[1][1][1], $GLOBALS['nextcloudPath']) && str_contains($params[1][1][0], $GLOBALS['nextcloudPath'])) {
+                    $urlFrom = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][0]);
+                    $urlTo = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][1]);
+                    webDAVRequest("MOVE", $urlFrom, "", $urlTo);
+                } else if ((str_contains($params[1][1][1], $GLOBALS['nextcloudPath'])) && (!str_contains($params[1][1][0], $GLOBALS['nextcloudPath']))) {
+                    //moved in nextcloud folder
+                    $dir = $params[1][1][1]."/";
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $dir);
+                    webDAVRequest("MKCOL", $url);
+                    $content = dirToArray($dir);
+                    $flatArray = array();
+                    flattenArray($content, $flatArray);
+                    foreach ($flatArray as $key => $value) {
+                        $path = $dir.$value;
+                        $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $path);
+                        if(vfs('isdir',array($path))) {
+                            webDAVRequest("MKCOL", $url);
+                        } else {
+                            webDAVRequest("PUT", $url, $path);
+                            webDAVRequest("PROPPATCH", $url, $path);
+                        }
+                    }
+                } else if ((!str_contains($params[1][1][1], $GLOBALS['nextcloudPath'])) && (str_contains($params[1][1][0], $GLOBALS['nextcloudPath']))) {
+                    //moved out of nextcloud folder
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][0]);
+                    webDAVRequest("DELETE", $url);
+                }
+                break;
+            case 'mkdir':
+                if (str_contains($params[1][1][0], $GLOBALS['nextcloudPath'])) {
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][0]);
+                    webDAVRequest("MKCOL", $url);
+                }
+                break;
+            case 'rmdir':
+                if (str_contains($params[1][1][0], $GLOBALS['nextcloudPath'])) {
+                    $url = str_replace($GLOBALS['nextcloudPath'], $GLOBALS['nextcloudURL'], $params[1][1][0]);
+                    webDAVRequest("DELETE", $url);
+                }
+                break;
+            
+            default:
+                # nothing to do without known event
+                break;
+        }
+    }
+    proc('end');
+}
+/*********************************************************************************************/
+//		Helper Functions
+/*********************************************************************************************/
+
+function updateVfs($filePath, $params) {
+    $modified = $params[0];
+    $synced = $params[1];
+    $creationapp = $params[2];
+
+    //Getting the xml information
+    $fileInfo = vfs('readInfo', array($filePath));
+    $fileInfoChanged = false;
+    if($creationapp) {
+        $fileInfo['eyeFile'][0]['creationapp'][0] = $creationapp;
+        $fileInfoChanged = true;
+    }
+    if($synced) {
+        $fileInfo['eyeFile'][0]['synced'][0] = $synced;
+        $fileInfoChanged = true;
+    }
+    //Creating the xml information
+    if($fileInfoChanged) {
+        $file = getRealFileName($filePath);
+        file_put_contents($file . '.' . EYEOS_INFO_EXT, eyeXML('array2xml',array($fileInfo)));
+    }
+    if($modified) {
+        touch($file . '.' . EYEOS_FILE_EXT, $modified);
+    }
+}
+
+function dirToArray($dir) {
+    $result = array();
+    $cdir = vfs('getDirContent',array($dir));
+    foreach ($cdir as $value)
+    {
+        if (!in_array($value,array(".","..")))
+        {
+            $returnVal = substr($value, strrpos($value, '/') + 1);
+            if (vfs('isdir',array($value)))
+            {
+                $result[$returnVal] = dirToArray($value);
+            } else {
+                $result[$returnVal] = $returnVal;
+            }
+        }
+    }
+    return $result;
+}
+
+function flattenArray($array, &$returnVal, $parent = "") {
+    if($parent !== "") {
+        $parent = $parent."/";
+    }
+    foreach ($array as $key => $value) {
+        if(is_array($value)){
+            $returnVal[$parent.$key] = $parent.$key;
+            flattenArray($value, $returnVal, $parent.$key);
+        } else {
+            $returnVal[$parent.$value] = $parent.$value;
+        }
+    }
+}
+
+function deleteChanges($arrayToCompare, $arrayToIterate, $parent = "") {
+    foreach ($arrayToIterate as $key => $value) {
+        $returnVal = true;
+        if($parent !== "") {$searchPath = $parent."/".$key;}else{$searchPath=$key;}
+        checkArray($arrayToCompare, $searchPath, $returnVal);
+        if($returnVal) {
+            if(is_Array($value)) {
+                deleteChanges($arrayToCompare, $value, $searchPath);
+            }
+        } else {
+                //delete path
+                $sURL = $GLOBALS['nextcloudURL'].$parent."/".(string)$key;
+                webDAVRequest("DELETE", $sURL);
+        }
+    }	
+}
+
+
+function checkArray($array, $searchPath, &$returnVal) {
+    $searchPath = rtrim($searchPath, "/");
+    if (strpos($searchPath, '/') !== false) {
+        $pathToSearch = explode("/", $searchPath);
+    } else {
+        $pathToSearch = array($searchPath);
+    }
+    if(array_key_exists($pathToSearch[0], $array)) {
+    //remove the first element of input
+        $array = $array[$pathToSearch[0]];
+        array_shift($pathToSearch);
+        if(empty($pathToSearch)) {
+            $returnVal = true;
+        } else {
+            checkArray($array, implode("/", $pathToSearch), $returnVal);
+        }
+    } else {
+        $returnVal = false;
+    }
+}
+
+function webDAVRequest($method, $url, $file = "",  $destination = "") {
+    $nextcloudUserData = base64_encode($GLOBALS['config']['nextcloud'][0]['username'][0].":".$GLOBALS['config']['nextcloud'][0]['password'][0]);
+    if($destination == "") {
+        $header = "Authorization: Basic " . $nextcloudUserData . "\r\n";
+    } else {
+        $header = "Authorization: Basic " . $nextcloudUserData . "\r\n"."Destination: ".$destination."\r\n"."Depth: infinity\r\n";
+    }
+    if($method == "PROPFIND") {
+        $content = '<?xml version="1.0" encoding="utf-8" ?>
+        <D:propfind xmlns:D="DAV:">
+            <D:prop> 
+                <D:oneyesync/>
+                <D:getlastmodified/>
+            </D:prop>
+        </D:propfind>';
+        $header = "Authorization: Basic " . $nextcloudUserData . "\r\n"."Depth: infinity\r\n";
+    }
+    if($method == "PROPPATCH") {
+        $fileModifiedTime = filemtime(getRealFileName($file) . '.' . EYEOS_FILE_EXT);
+        $content = '<?xml version="1.0" encoding="utf-8" ?> 
+        <d:propertyupdate xmlns:d="DAV:">
+        <d:set> 
+            <d:prop> 
+                <d:oneyesync>' . $fileModifiedTime . '</d:oneyesync>
+            </d:prop> 
+        </d:set> 
+        </d:propertyupdate>';
+        $header = "Authorization: Basic " . $nextcloudUserData . "\r\n"."Content-type: application/xml\r\n";
+        updateVfs($file,array(null, $fileModifiedTime));		
+    }
+    if($method == "PUT") {
+        $fp = vfs('open',array($file,'r'));
+        $size = vfs('filesize',array($file));
+        $content = fread($fp,$size);
+        fclose($fp);
+    }
+    $opts = array(
+            'http'=>array(
+                'method'=>$method,
+                'header'=>$header,
+                'content'=>$content
+            )
+    );
+    $context = stream_context_create($opts);
+    $return = file_get_contents($url, false, $context);
+    return $return;
+}
+
+function str_contains($haystack, $needle) {
+    return $needle !== '' && mb_strpos($haystack, $needle) !== false;
+}
+?>
